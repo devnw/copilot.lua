@@ -4,10 +4,12 @@ local config = require("copilot.config")
 local hl_group = require("copilot.highlight").group
 local util = require("copilot.util")
 local logger = require("copilot.logger")
+local suggestion_util = require("copilot.suggestion.utils")
+local utils = require("copilot.client.utils")
 
 local M = {}
 
----@alias copilot_suggestion_context { first?: integer, cycling?: integer, cycling_callbacks?: (fun(ctx: copilot_suggestion_context):nil)[], params?: table, suggestions?: copilot_get_completions_data_completion[], choice?: integer, shown_choices?: table<string, true> }
+---@alias copilot_suggestion_context { first?: integer, cycling?: integer, cycling_callbacks?: (fun(ctx: copilot_suggestion_context):nil)[], params?: table, suggestions?: copilot_get_completions_data_completion[], choice?: integer, shown_choices?: table<string, true>, accepted_partial?: boolean }
 
 local copilot = {
   setup_done = false,
@@ -23,6 +25,8 @@ local copilot = {
   hide_during_completion = true,
   debounce = 75,
 }
+
+local ignore_next_cursor_moved = false
 
 local function with_client(fn)
   local client = c.get()
@@ -56,6 +60,49 @@ local function get_ctx(bufnr)
   return ctx
 end
 
+---@param idx integer
+---@param new_line integer
+---@param new_end_col integer
+---@param bufnr? integer
+local function update_ctx_suggestion_position(idx, new_line, new_end_col, bufnr)
+  bufnr = bufnr or vim.api.nvim_get_current_buf()
+
+  if not copilot.context[bufnr] then
+    return
+  end
+
+  if not copilot.context[bufnr].suggestions[idx] then
+    return
+  end
+
+  local suggestion = copilot.context[bufnr].suggestions[idx]
+  suggestion.range["start"].line = new_line
+  suggestion.range["start"].character = 0
+  suggestion.range["end"].line = new_line
+  suggestion.range["end"].character = new_end_col
+end
+
+---@param idx integer
+---@param text string
+---@param bufnr? integer
+local function set_ctx_suggestion_text(idx, text, bufnr)
+  bufnr = bufnr or vim.api.nvim_get_current_buf()
+
+  if not copilot.context[bufnr] then
+    return
+  end
+
+  if not copilot.context[bufnr].suggestions[idx] then
+    return
+  end
+
+  local suggestion = copilot.context[bufnr].suggestions[idx]
+  local end_offset = #suggestion.text - #text
+  suggestion.text = text
+  suggestion.range["end"].character = suggestion.range["end"].character - end_offset
+  copilot.context[bufnr].suggestions[idx] = suggestion
+end
+
 ---@param ctx copilot_suggestion_context
 local function reset_ctx(ctx)
   logger.trace("suggestion reset context", ctx)
@@ -66,6 +113,7 @@ local function reset_ctx(ctx)
   ctx.suggestions = nil
   ctx.choice = nil
   ctx.shown_choices = nil
+  ctx.accepted_partial = nil
 end
 
 local function set_keymap(keymap)
@@ -186,12 +234,12 @@ local function cancel_inflight_requests(ctx)
 
   with_client(function(client)
     if ctx.first then
-      client.cancel_request(ctx.first)
+      utils.wrap(client):cancel_request(ctx.first)
       ctx.first = nil
       logger.trace("suggestion cancel first request")
     end
     if ctx.cycling then
-      client.cancel_request(ctx.cycling)
+      utils.wrap(client):cancel_request(ctx.cycling)
       ctx.cycling = nil
       logger.trace("suggestion cancel cycling request")
     end
@@ -226,11 +274,6 @@ local function get_current_suggestion(ctx)
       return nil
     end
 
-    if choice.range.start.character ~= 0 then
-      -- unexpected range
-      return nil
-    end
-
     return choice
   end)
 
@@ -255,8 +298,6 @@ local function update_preview(ctx)
     return
   end
 
-  ---@todo support popup preview
-
   local annot = ""
   if ctx.cycling_callbacks then
     annot = "(1/…)"
@@ -265,14 +306,25 @@ local function update_preview(ctx)
   end
 
   local cursor_col = vim.fn.col(".")
+  local cursor_line = vim.fn.line(".") - 1
+  local current_line = vim.api.nvim_buf_get_lines(0, cursor_line, cursor_line + 1, false)[1]
+  local text_after_cursor = string.sub(current_line, cursor_col)
 
   displayLines[1] =
     string.sub(string.sub(suggestion.text, 1, (string.find(suggestion.text, "\n", 1, true) or 0) - 1), cursor_col)
 
+  local suggestion_line1 = displayLines[1]
+
+  if #displayLines == 1 then
+    suggestion_line1 = suggestion_util.remove_common_suffix(text_after_cursor, suggestion_line1)
+    local suggest_text = suggestion_util.remove_common_suffix(text_after_cursor, suggestion.text)
+    set_ctx_suggestion_text(ctx.choice, suggest_text)
+  end
+
   local extmark = {
     id = copilot.extmark_id,
-    virt_text_win_col = vim.fn.virtcol(".") - 1,
-    virt_text = { { displayLines[1], hl_group.CopilotSuggestion } },
+    virt_text = { { suggestion_line1, hl_group.CopilotSuggestion } },
+    virt_text_pos = "inline",
   }
 
   if #displayLines > 1 then
@@ -288,9 +340,14 @@ local function update_preview(ctx)
     extmark.virt_text[3] = { annot, hl_group.CopilotAnnotation }
   end
 
-  extmark.hl_mode = "combine"
-
+  extmark.hl_mode = "replace"
   vim.api.nvim_buf_set_extmark(0, copilot.ns_id, vim.fn.line(".") - 1, cursor_col - 1, extmark)
+
+  if config.suggestion.suggestion_notification then
+    vim.schedule(function()
+      config.suggestion.suggestion_notification(extmark.virt_text, extmark.virt_lines or {})
+    end)
+  end
 
   if not ctx.shown_choices[suggestion.uuid] then
     ctx.shown_choices[suggestion.uuid] = true
@@ -450,6 +507,10 @@ function M.next()
   local ctx = get_ctx()
   logger.trace("suggestion next", ctx)
 
+  if ctx.accepted_partial then
+    reset_ctx(ctx)
+  end
+
   -- no suggestion request yet
   if not ctx.first then
     logger.trace("suggestion next, no first request")
@@ -465,6 +526,10 @@ end
 function M.prev()
   local ctx = get_ctx()
   logger.trace("suggestion prev", ctx)
+
+  if ctx.accepted_partial then
+    reset_ctx(ctx)
+  end
 
   -- no suggestion request yet
   if not ctx.first then
@@ -495,11 +560,15 @@ function M.accept(modifier)
     return
   end
 
-  cancel_inflight_requests(ctx)
-  reset_ctx(ctx)
-
   if type(modifier) == "function" then
     suggestion = modifier(suggestion)
+  end
+
+  local accepted_partial = suggestion.partial_text and suggestion.partial_text ~= ""
+
+  if not accepted_partial then
+    cancel_inflight_requests(ctx)
+    reset_ctx(ctx)
   end
 
   with_client(function(client)
@@ -515,33 +584,68 @@ function M.accept(modifier)
     end
   end)
 
-  clear_preview()
+  local newText
 
-  local range, newText = suggestion.range, suggestion.text
+  if accepted_partial then
+    newText = suggestion.partial_text
+    ctx.accepted_partial = true
+    ignore_next_cursor_moved = true
+  else
+    clear_preview()
+    newText = suggestion.text
+  end
+
+  local range = suggestion.range
   local cursor = vim.api.nvim_win_get_cursor(0)
   local line, character = cursor[1] - 1, cursor[2]
   if range["end"].line == line and range["end"].character < character then
     range["end"].character = character
   end
 
-  -- Hack for 'autoindent', makes the indent persist. Check `:help 'autoindent'`.
   vim.schedule_wrap(function()
     -- Create an undo breakpoint
     vim.cmd("let &undolevels=&undolevels")
+    -- Hack for 'autoindent', makes the indent persist. Check `:help 'autoindent'`.
     vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes("<Space><Left><Del>", true, false, true), "n", false)
     local bufnr = vim.api.nvim_get_current_buf()
-    local encoding = vim.api.nvim_get_option_value("fileencoding", { buf = bufnr }) ~= ""
-        and vim.api.nvim_get_option_value("fileencoding", { buf = bufnr })
-      or vim.api.nvim_get_option_value("encoding", { scope = "global" })
-    vim.lsp.util.apply_text_edits({ { range = range, newText = newText } }, bufnr, encoding)
-    -- Put cursor at the end of current line.
-    local cursor_keys = "<End>"
 
-    -- TODO: Move to util and check only once
-    if vim.fn.has("nvim-0.11") == 1 then
-      cursor_keys = string.rep("<Down>", #vim.split(newText, "\n", { plain = true }) - 1) .. cursor_keys
+    -- only utf encodings are supported
+    local encoding = vim.api.nvim_get_option_value("fileencoding", { buf = bufnr })
+    if not encoding or encoding == "" or encoding ~= "utf-8" or encoding ~= "utf-16" or encoding ~= "utf-32" then
+      encoding = vim.api.nvim_get_option_value("encoding", { scope = "global" })
+
+      if not encoding or encoding == "" or encoding ~= "utf-8" or encoding ~= "utf-16" or encoding ~= "utf-32" then
+        encoding = "utf-8"
+      end
     end
-    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes(cursor_keys, true, false, true), "n", false)
+
+    local lines = vim.split(newText, "\n", { plain = true })
+    local lines_count = #lines
+    local last_col = #lines[lines_count]
+
+    -- apply_text_edits will remove the last \n if the last line is empty,
+    -- so we trick it by adding an extra one
+    if last_col == 0 then
+      newText = newText .. "\n"
+    end
+
+    vim.lsp.util.apply_text_edits({ { range = range, newText = newText } }, bufnr, encoding)
+
+    -- Position cursor at the end of the last inserted line
+    local new_cursor_line = range["start"].line + #lines
+    vim.api.nvim_win_set_cursor(0, { new_cursor_line, last_col })
+
+    if accepted_partial then
+      suggestion.partial_text = nil
+
+      for _ = 1, lines_count - 1 do
+        suggestion.text = suggestion.text:sub(suggestion.text:find("\n") + 1)
+        suggestion.displayText = suggestion.displayText:sub(suggestion.displayText:find("\n") + 1)
+      end
+
+      update_ctx_suggestion_position(ctx.choice, new_cursor_line - 1, last_col, bufnr)
+      update_preview(ctx)
+    end
   end)()
 end
 
@@ -554,19 +658,18 @@ function M.accept_word()
 
     local _, char_idx = string.find(text, "%s*%p*[^%s%p]*%s*", character + 1)
     if char_idx then
-      suggestion.text = string.sub(text, 1, char_idx)
-
-      range["end"].line = range["start"].line
+      suggestion.partial_text = string.sub(text, 1, char_idx)
       range["end"].character = char_idx
     end
 
+    range["end"].line = range["start"].line
     return suggestion
   end)
 end
 
 function M.accept_line()
   M.accept(function(suggestion)
-    local text = suggestion.text
+    local range, text = suggestion.range, suggestion.text
 
     local cursor = vim.api.nvim_win_get_cursor(0)
     local _, character = cursor[1], cursor[2]
@@ -574,9 +677,11 @@ function M.accept_line()
     local next_char = string.sub(text, character + 1, character + 1)
     local _, char_idx = string.find(text, next_char == "\n" and "\n%s*[^\n]*\n%s*" or "\n%s*", character)
     if char_idx then
-      suggestion.text = string.sub(text, 1, char_idx)
+      suggestion.partial_text = string.sub(text, 1, char_idx)
+      range["end"].character = char_idx
     end
 
+    range["end"].line = range["start"].line
     return suggestion
   end)
 end
@@ -621,6 +726,11 @@ local function on_buf_enter()
 end
 
 local function on_cursor_moved_i()
+  if ignore_next_cursor_moved then
+    ignore_next_cursor_moved = false
+    return
+  end
+
   local ctx = get_ctx()
   if copilot._copilot_timer or ctx.params or should_auto_trigger() then
     logger.trace("suggestion on cursor moved insert")

@@ -1,4 +1,5 @@
 local logger = require("copilot.logger")
+local utils = require("copilot.client.utils")
 ---@class CopilotApi
 local M = {
   ---@deprecated
@@ -19,11 +20,11 @@ function M.request(client, method, params, callback)
   params.bufnr = nil
 
   if callback then
-    return client.request(method, params, callback, bufnr)
+    return utils.wrap(client):request(method, params, callback, bufnr)
   end
 
   local co = coroutine.running()
-  client.request(method, params, function(err, data, ctx)
+  utils.wrap(client):request(method, params, function(err, data, ctx)
     coroutine.resume(co, err, data, ctx)
   end, bufnr)
   return coroutine.yield()
@@ -32,12 +33,7 @@ end
 ---@return boolean sent
 function M.notify(client, method, params)
   logger.trace("api notify:", method, params)
-
-  if vim.fn.has("nvim-0.11") == 1 then
-    return client:notify(method, params)
-  else
-    return client.notify(method, params)
-  end
+  return utils.wrap(client):notify(method, params)
 end
 
 ---@alias copilot_editor_info { name: string, version: string }
@@ -134,7 +130,7 @@ function M.notify_shown(client, params, callback)
   return M.request(client, "notifyShown", params, callback)
 end
 
----@alias copilot_get_completions_data_completion { displayText: string, position: { character: integer, line: integer }, range: { ['end']: { character: integer, line: integer }, start: { character: integer, line: integer } }, text: string, uuid: string }
+---@alias copilot_get_completions_data_completion { displayText: string, position: { character: integer, line: integer }, range: { ['end']: { character: integer, line: integer }, start: { character: integer, line: integer } }, text: string, uuid: string, partial_text: string }
 ---@alias copilot_get_completions_data { completions: copilot_get_completions_data_completion[] }
 
 ---@return any|nil err

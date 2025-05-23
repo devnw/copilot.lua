@@ -13,7 +13,7 @@ function M.get_editor_info()
     editorPluginInfo = {
       name = "copilot.lua",
       -- reflects version of github/copilot-language-server-release
-      version = "1.300.0",
+      version = "1.323.0",
     },
   }
   return info
@@ -77,7 +77,7 @@ function M.get_doc()
   return doc
 end
 
--- Used by copilot.cmp to watch out if moving it
+-- Used by copilot.cmp so watch out if moving it
 function M.get_doc_params(overrides)
   overrides = overrides or {}
 

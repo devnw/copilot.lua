@@ -11,6 +11,31 @@ As lua is far more efficient and makes things easier to integrate with modern pl
 
 </details>
 
+## Table Of Contents
+
+<!--toc:start-->
+
+- [Requirements](#requirements)
+- [Install](#install)
+  - [Authentication](#authentication)
+    - [Authentication with Alternate GitHub Instances](#authentication-with-alternate-github-instances)
+- [Setup and Configuration](#setup-and-configuration)
+  - [panel](#panel)
+  - [suggestion](#suggestion)
+  - [filetypes](#filetypes)
+  - [logger](#logger)
+  - [copilot_node_command](#copilot_node_command)
+  - [server_opts_overrides](#server_opts_overrides)
+  - [workspace_folders](#workspace_folders)
+  - [root_dir](#root_dir)
+  - [should_attach](#should_attach)
+  - [server](#server)
+- [Commands](#commands)
+- [Integrations](#integrations)
+- [FAQ](#faq)
+
+<!--toc:end-->
+
 ## Requirements
 
 - Curl
@@ -76,7 +101,8 @@ use {
 }
 ```
 
-The following is the default configuration:
+<details>
+<summary>Default configuration</summary>
 
 ```lua
 require('copilot').setup({
@@ -132,7 +158,7 @@ require('copilot').setup({
   },
   copilot_node_command = 'node', -- Node.js version must be > 20
   workspace_folders = {},
-  copilot_model = "",  -- Current LSP default is gpt-35-turbo, supports gpt-4o-copilot
+  copilot_model = "",
   root_dir = function()
     return vim.fs.dirname(vim.fs.find(".git", { upward = true })[1])
   end,
@@ -156,6 +182,8 @@ require('copilot').setup({
   server_opts_overrides = {},
 })
 ```
+
+</details>
 
 ### panel
 
@@ -297,7 +325,7 @@ vim.log = {
 
 - `off`
 - `messages` which will output the LSP messages
-- `verbose` which adds additonal information to the message.
+- `verbose` which adds additional information to the message.
 
 When `trace_lsp_progress` is true, LSP progress messages (`$/progress`) will also be logged.
 When `log_lsp_messages` is true, LSP log messages (`window/logMessage`) events will be logged.
@@ -318,7 +346,7 @@ copilot_node_command = vim.fn.expand("$HOME") .. "/.config/nvm/versions/node/v20
 
 Override copilot lsp client settings. The `settings` field is where you can set the values of the options defined in [SettingsOpts.md](./SettingsOpts.md).
 These options are specific to the copilot lsp and can be used to customize its behavior. Ensure that the name field is not overridden as is is used for
-efficiency reasons in numerous checks to verify copilot is actually running. See `:h vim.lsp.start_client` for list of options.
+efficiency reasons in numerous checks to verify copilot is actually running. See `:h vim.lsp.start` for list of options.
 
 Example:
 
@@ -339,7 +367,7 @@ require("copilot").setup {
 ### workspace_folders
 
 Workspace folders improve Copilot's suggestions.
-By default, the root_dir is used as a wokspace_folder.
+By default, the root_dir is used as a workspace_folder.
 
 Additional folders can be added through the configuration as such:
 
@@ -380,11 +408,13 @@ require("copilot").setup {
 
 ### server
 
-> [!CAUTION] > `"binary"` mode is still very much experimental, please report any issues you encounter.
+> [!CAUTION]
+> `"binary"` mode is still very much experimental, please report any issues you encounter.
 
 `type` can be either `"nodejs"` or `"binary"`. The binary version will be downloaded if used.
 
-`custom_server_filepath` is used to specify the path of either the path (filename included) of the `js` file if using `"nodejs"` or the path to the binary if using `"binary"`.
+`custom_server_filepath` is used to specify the server path (filename included) of either the `js` file if using `"nodejs"` or to the binary if using `"binary"`.
+The filename on its own can also be set if accessible through your PATH.
 When using `"binary"`, the download process will be disabled and the binary will be used directly.
 example:
 
@@ -409,3 +439,31 @@ The `copilot.api` module can be used to build integrations on top of `copilot.lu
 - [giuxtaposition/blink-cmp-copilot](https://github.com/giuxtaposition/blink-cmp-copilot): Integration with [`blink.cmp`](https://github.com/Saghen/blink.cmp).
 - [fang2hou/blink-copilot](https://github.com/fang2hou/blink-copilot): Integration with [`blink.cmp`](https://github.com/Saghen/blink.cmp), with some differences.
 - [AndreM222/copilot-lualine](https://github.com/AndreM222/copilot-lualine): Integration with [`lualine.nvim`](https://github.com/nvim-lualine/lualine.nvim).
+
+## FAQ
+
+> Certificate Parsing Error
+
+This is an issue with the copilot lsp itself as described in [this discussion](https://github.com/orgs/community/discussions/136273#discussioncomment-10433527). Please update the plugin to the latest version to solve this issue.
+If updating does not help, some users have reported that updating the `/usr/bin/update-ca-trust` and removing the --comment option from the trust extract commands solves the issue.
+However this has not been verified by the author of this plugin and may have unintended consequences so thread with care.
+
+> Multiple offset encodings warning
+
+As discussed in #247, the problem arises because two or more clients are using different offset encodings. To solve this, in lspconfig:
+
+```lua
+local capabilities = vim.lsp.protocol.make_client_capabilities() -- Get The capabilities
+capabilities.general.positionEncodings = { "utf-16" } -- Set the offset encoding, see `:h vim.lsp.start` for more info
+require("lspconfig")[server].setup({ capabilities = capabilities }) -- Setup the server
+```
+
+Set the same for copilot in `server_opts_overrides`:
+
+```lua
+server_opts_overrides = {
+  offset_encoding = "utf-16" -- Set the offset encoding same as above, see `:h vim.lsp.start` for more info
+}
+```
+
+Refer to your plugins documentation for changes.

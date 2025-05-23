@@ -4,12 +4,12 @@ local config = require("copilot.config")
 local hl_group = require("copilot.highlight").group
 local util = require("copilot.util")
 local logger = require("copilot.logger")
+local utils = require("copilot.panel.utils")
 
 local M = {
   handlers = require("copilot.panel.handlers"),
 }
 local marker_prefix = "[copilot] "
-local panel_uri_prefix = "copilot://"
 
 local panel = {
   ---@type vim.lsp.Client
@@ -64,21 +64,6 @@ local function get_display_lines(text)
   end
 
   return lines
-end
-
----@return string panelUri
-local function panel_uri_from_doc_uri(doc_uri)
-  return doc_uri:gsub("^file://", panel_uri_prefix)
-end
-
----@return string doc_uri
-local function panel_uri_to_doc_uri(panel_uri)
-  return panel_uri:gsub("^" .. panel_uri_prefix, "file://")
-end
-
----@param bufname string
-local function is_panel_uri(bufname)
-  return bufname:sub(1, #panel_uri_prefix) == panel_uri_prefix
 end
 
 function panel:lock()
@@ -215,7 +200,8 @@ function panel:accept()
     return
   end
 
-  local bufnr = vim.uri_to_bufnr(panel_uri_to_doc_uri(self.panel_uri))
+  local doc_uri = utils.panel_uri_to_doc_uri(self.panel_uri)
+  local bufnr = vim.uri_to_bufnr(doc_uri)
   local winid = vim.fn.bufwinid(bufnr)
 
   if not vim.api.nvim_buf_is_loaded(bufnr) or winid == -1 then
@@ -373,7 +359,7 @@ function panel:ensure_winid()
   if self.auto_refresh then
     vim.api.nvim_create_autocmd({ "TextChangedI", "TextChangedP" }, {
       group = self.augroup,
-      buffer = vim.uri_to_bufnr(panel_uri_to_doc_uri(self.panel_uri)),
+      buffer = vim.uri_to_bufnr(utils.panel_uri_to_doc_uri(self.panel_uri)),
       callback = function()
         self.state.auto_refreshing = true
         self:refresh()
@@ -500,7 +486,7 @@ end
 function panel:init()
   local doc = util.get_doc()
 
-  if is_panel_uri(doc.uri) then
+  if utils.is_panel_uri(doc.uri) then
     -- currently inside the panel itself
     M.refresh()
     return
@@ -512,15 +498,11 @@ function panel:init()
     return
   end
 
-  self.panel_uri = panel_uri_from_doc_uri(doc.uri)
+  self.panel_uri = utils.panel_uri_from_doc_uri(doc.uri)
   self.filetype = vim.bo.filetype
-
   self:ensure_bufnr()
-
   self:ensure_winid()
-
   self:refresh()
-
   vim.api.nvim_set_current_win(self.winid)
 end
 
@@ -545,7 +527,7 @@ function M.toggle()
 end
 
 function M.refresh()
-  vim.api.nvim_buf_call(vim.uri_to_bufnr(panel_uri_to_doc_uri(panel.panel_uri)), function()
+  vim.api.nvim_buf_call(vim.uri_to_bufnr(utils.panel_uri_to_doc_uri(panel.panel_uri)), function()
     panel:refresh()
   end)
 end
